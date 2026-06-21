@@ -249,21 +249,23 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
             </box>
 
             <Show when={mode() === "normal"}>
-              <box paddingLeft={4} paddingRight={4} flexDirection="row" justifyContent="space-between" backgroundColor={theme().backgroundElement}>
-                <box flexDirection="row" gap={2}>
-                  <text fg={theme().textMuted}>NORMAL</text>
-                  <text fg={theme().textMuted}>j/k move</text>
-                  <text fg={theme().textMuted}>d/u scroll</text>
-                </box>
-                <box flexDirection="row" gap={2}>
-                  <text fg={theme().textMuted}>/ search</text>
-                  <text fg={theme().textMuted}>enter open</text>
-                </box>
+              <box paddingLeft={4} paddingRight={4} flexDirection="row" backgroundColor={theme().backgroundElement} gap={2}>
+                <text fg={theme().accent}><span style={{ bold: true }}>NORMAL</span></text>
+                <text fg={theme().textMuted}>·</text>
+                <text fg={theme().text}>j/k move</text>
+                <text fg={theme().textMuted}>·</text>
+                <text fg={theme().textMuted}>d/u scroll</text>
+                <text fg={theme().textMuted}>·</text>
+                <text fg={theme().text}>/ search</text>
+                <text fg={theme().textMuted}>·</text>
+                <text fg={theme().textMuted}>enter open</text>
               </box>
             </Show>
             <Show when={mode() === "insert"}>
-              <box paddingLeft={4} paddingRight={4} flexDirection="row" backgroundColor={theme().backgroundElement}>
-                <text fg={theme().textMuted}>INSERT  ^Q normal</text>
+              <box paddingLeft={4} paddingRight={4} flexDirection="row" backgroundColor={theme().backgroundElement} gap={2}>
+                <text fg={theme().warning}><span style={{ bold: true }}>INSERT</span></text>
+                <text fg={theme().textMuted}>·</text>
+                <text fg={theme().textMuted}>^Q normal</text>
               </box>
             </Show>
 
