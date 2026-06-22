@@ -126,32 +126,51 @@ export function recentSessionMessages(options?: { limit?: number; offset?: numbe
 export function loadConversationWindow(result: SearchResult, options?: { before?: number; after?: number; dbPath?: string }) {
   const db = new Database(options?.dbPath ?? resolveDatabasePath(), { readonly: true })
   try {
-    return db
-      .query<ConversationRow, [string, string, number, number]>(`
-        WITH visible AS (
-          SELECT p.id,
-                 p.message_id,
-                 p.session_id,
-                 json_extract(m.data, '$.role') AS role,
-                 json_extract(p.data, '$.type') AS type,
-                 p.time_created,
-                 p.data,
-                 row_number() OVER (ORDER BY p.time_created ASC, p.id ASC) AS rn
-          FROM part p
-          JOIN message m ON m.id = p.message_id
-          WHERE p.session_id = ?
-            AND json_extract(p.data, '$.type') IN ('text', 'reasoning', 'tool')
-            AND json_extract(m.data, '$.role') IN ('user', 'assistant')
-        ), hit AS (
-          SELECT rn FROM visible WHERE id = ?
-        )
-        SELECT id, message_id, session_id, role, type, time_created, data
-        FROM visible
-        WHERE rn BETWEEN (SELECT rn FROM hit) - ? AND (SELECT rn FROM hit) + ?
-        ORDER BY time_created ASC, id ASC
-      `)
-      .all(result.sessionID, result.id, options?.before ?? 3, options?.after ?? 6)
-      .flatMap((row) => parseConversationPart(row, row.id === result.id) ?? [])
+    const before = options?.before ?? 3
+    const after = options?.after ?? 6
+
+    const hit = db.query<{ time_created: number }, [string]>(
+      "SELECT time_created FROM part WHERE id = ?",
+    ).get(result.id)
+    if (!hit) return []
+
+    const fetchBefore = Math.max(before * 4, 30)
+    const fetchAfter = Math.max(after * 4, 50)
+
+    const beforeRows = db.query<ConversationRow, [string, number, number, string, number]>(`
+      SELECT p.id, p.message_id, p.session_id,
+             json_extract(m.data, '$.role') AS role,
+             json_extract(p.data, '$.type') AS type,
+             p.time_created, p.data
+      FROM part p
+      JOIN message m ON m.id = p.message_id
+      WHERE p.session_id = ?
+        AND (p.time_created < ? OR (p.time_created = ? AND p.id < ?))
+      ORDER BY p.time_created DESC, p.id DESC
+      LIMIT ?
+    `).all(result.sessionID, hit.time_created, hit.time_created, result.id, fetchBefore)
+
+    const afterRows = db.query<ConversationRow, [string, number, number, string, number]>(`
+      SELECT p.id, p.message_id, p.session_id,
+             json_extract(m.data, '$.role') AS role,
+             json_extract(p.data, '$.type') AS type,
+             p.time_created, p.data
+      FROM part p
+      JOIN message m ON m.id = p.message_id
+      WHERE p.session_id = ?
+        AND (p.time_created > ? OR (p.time_created = ? AND p.id >= ?))
+      ORDER BY p.time_created ASC, p.id ASC
+      LIMIT ?
+    `).all(result.sessionID, hit.time_created, hit.time_created, result.id, fetchAfter)
+
+    const isValid = (row: ConversationRow) =>
+      (row.role === "user" || row.role === "assistant") &&
+      (row.type === "text" || row.type === "reasoning" || row.type === "tool")
+
+    return [
+      ...beforeRows.filter(isValid).slice(0, before).reverse(),
+      ...afterRows.filter(isValid).slice(0, after + 1),
+    ].flatMap((row) => parseConversationPart(row, row.id === result.id) ?? [])
   } finally {
     db.close()
   }
