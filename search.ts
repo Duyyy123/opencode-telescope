@@ -150,7 +150,7 @@ export function loadConversationWindow(result: SearchResult, options?: { before?
         WHERE rn BETWEEN (SELECT rn FROM hit) - ? AND (SELECT rn FROM hit) + ?
         ORDER BY time_created ASC, id ASC
       `)
-      .all(result.sessionID, result.id, options?.before ?? 12, options?.after ?? 24)
+      .all(result.sessionID, result.id, options?.before ?? 3, options?.after ?? 6)
       .flatMap((row) => parseConversationPart(row, row.id === result.id) ?? [])
   } finally {
     db.close()

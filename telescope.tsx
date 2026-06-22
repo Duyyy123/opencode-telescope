@@ -31,6 +31,10 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
   const [loadingMore, setLoadingMore] = createSignal(false)
   const BATCH_SIZE = 25
   const RECENT_BATCH_SIZE = 15
+  const INITIAL_PREVIEW_BEFORE = 3
+  const INITIAL_PREVIEW_AFTER = 6
+  const PREVIEW_EXPAND_STEP = 5
+  const [previewRange, setPreviewRange] = createSignal({ before: INITIAL_PREVIEW_BEFORE, after: INITIAL_PREVIEW_AFTER })
   let input: InputRenderable | undefined
   let resultScroll: ScrollBoxRenderable | undefined
   let previewScroll: ScrollBoxRenderable | undefined
@@ -135,19 +139,25 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
     onCleanup(() => clearTimeout(timer))
   })
 
+  let lastPreviewItemId = ""
   createEffect(() => {
     const item = selectedResult()
+    const range = previewRange()
     if (!item) {
       setPreviewParts([])
       return
     }
+    if (item.id !== lastPreviewItemId) {
+      lastPreviewItemId = item.id
+      setPreviewRange({ before: INITIAL_PREVIEW_BEFORE, after: INITIAL_PREVIEW_AFTER })
+      return
+    }
     const db = dbPath()
-    setPreviewParts([])
     const timer = setTimeout(() => {
       try {
-        setPreviewParts(loadConversationWindow(item, { before: 12, after: 24, dbPath: db }))
+        setPreviewParts(loadConversationWindow(item, { before: range.before, after: range.after, dbPath: db }))
       } catch {
-        setPreviewParts([])
+        // keep existing parts on error
       }
     }, 200)
     onCleanup(() => clearTimeout(timer))
@@ -155,9 +165,28 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
 
   createEffect(() => {
     const item = selectedResult()
+    if (!item) return
+    const interval = setInterval(() => {
+      const scroll = previewScroll
+      const children = scroll?.getChildren()
+      if (!scroll || !children || children.length === 0) return
+      const range = previewRange()
+      const lastChild = children[children.length - 1] as { y: number; height: number }
+      const totalContentHeight = lastChild.y + lastChild.height
+      const atTop = scroll.y <= 0 && range.before > 0
+      const atBottom = scroll.y + scroll.height >= totalContentHeight - 1
+      if (atTop) setPreviewRange((prev) => ({ ...prev, before: prev.before + PREVIEW_EXPAND_STEP }))
+      if (atBottom) setPreviewRange((prev) => ({ ...prev, after: prev.after + PREVIEW_EXPAND_STEP }))
+    }, 400)
+    onCleanup(() => clearInterval(interval))
+  })
+
+  createEffect(() => {
+    const item = selectedResult()
     previewParts()
     if (!item) return
-    setTimeout(() => scrollPreviewToTarget(previewScroll, messageTargetID(item)), 1)
+    const timer = setTimeout(() => scrollPreviewToTarget(previewScroll, messageTargetID(item)), 1)
+    onCleanup(() => clearTimeout(timer))
   })
 
   const open = () => {
