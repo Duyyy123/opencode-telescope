@@ -13,5 +13,6 @@
     "skipLibCheck": true,
     "types": ["bun"]
   },
-  "include": ["**/*.ts", "**/*.tsx"]
+  "include": ["**/*.ts", "**/*.tsx"],
+  "exclude": ["opencode-smart-session-picker/**"]
 }
