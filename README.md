@@ -1,6 +1,6 @@
 # opencode-telescope
 
-Fuzzy search across all your OpenCode conversations — grep through session history, find code snippets, and jump to any chat instantly.
+Fuzzy search across all your OpenCode conversations — grep through session and chat history, find code snippets, and jump to any chat instantly.
 
 > Inspired by [telescope.nvim](https://github.com/nvim-telescope/telescope.nvim) — a fuzzy finder for your conversation history.
 
