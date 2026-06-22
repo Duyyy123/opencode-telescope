@@ -38,6 +38,7 @@
     "release:major": "bun run typecheck && bun test && npm version major -m \"chore: release %s\" && git push && git push origin $(git describe --tags --abbrev=0)"
   },
   "files": [
+    "assets",
     "README.md",
     "LICENSE",
     "tui.tsx",

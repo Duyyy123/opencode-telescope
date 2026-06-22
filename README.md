@@ -4,6 +4,8 @@ Fuzzy search across all your OpenCode conversations — grep through session and
 
 > Inspired by [telescope.nvim](https://github.com/nvim-telescope/telescope.nvim) — a fuzzy finder for your conversation history.
 
+![Demo](./assets/demo.svg)
+
 ## Use cases
 
 - **"I know I discussed this somewhere"** — grep all your sessions by keyword
@@ -47,3 +49,5 @@ Add the plugin to your `tui.json`:
 ## How it works
 
 Reads the OpenCode local SQLite session database in read-only mode, parses conversations into searchable text, and opens the selected session through the existing TUI route.
+
+![Demo animation](./assets/demo.gif)
