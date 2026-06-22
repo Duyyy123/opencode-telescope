@@ -57,4 +57,67 @@ describe("session search helpers", () => {
       ),
     ).toBeUndefined()
   })
+
+  test("matches multi-token queries in order (contiguous)", () => {
+    const result = rowToSearchResult(
+      {
+        id: "prt_2",
+        message_id: "msg_2",
+        session_id: "ses_2",
+        session_title: "Test",
+        directory: "/tmp/project",
+        role: "assistant",
+        time_created: 2,
+        text: "let me test this function",
+      },
+      "let me",
+    )
+    expect(result).toBeDefined()
+    expect(result!.match).toBe("let me")
+    expect(result!.before).not.toContain("let")
+    expect(result!.after).toContain("test")
+  })
+
+  test("matches multi-token queries with words between (ordered gap)", () => {
+    const result = rowToSearchResult(
+      {
+        id: "prt_3",
+        message_id: "msg_3",
+        session_id: "ses_3",
+        session_title: "Test",
+        directory: "/tmp/project",
+        role: "assistant",
+        time_created: 3,
+        text: "let us now test me please",
+      },
+      "let me",
+    )
+    expect(result).toBeDefined()
+    expect(result!.match).toBe("let us now test me")
+  })
+
+  test("rejects multi-token queries when tokens are out of order", () => {
+    expect(
+      rowToSearchResult(
+        {
+          id: "prt_4",
+          message_id: "msg_4",
+          session_id: "ses_4",
+          session_title: "Test",
+          directory: "/tmp/project",
+          role: "user",
+          time_created: 4,
+          text: "me let",
+        },
+        "let me",
+      ),
+    ).toBeUndefined()
+  })
+
+  test("makeSnippet works with multi-token queries", () => {
+    const text = "a ".repeat(50) + "let me test" + " b".repeat(50)
+    const snippet = makeSnippet(text, "let me")
+    expect(snippet).toContain("let")
+    expect(snippet).toContain("me")
+  })
 })

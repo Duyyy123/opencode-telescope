@@ -215,10 +215,20 @@ export function extractSearchText(data: string) {
 
 export function makeSnippet(text: string, query: string, radius = 72) {
   const haystack = text.replace(/\s+/g, " ").trim()
-  const index = haystack.toLowerCase().indexOf(query.trim().toLowerCase())
-  if (index === -1) return truncate(haystack, radius * 2)
-  const start = Math.max(0, index - radius)
-  const end = Math.min(haystack.length, index + query.length + radius)
+  const tokens = query.trim().split(/\s+/)
+  const lower = haystack.toLowerCase()
+  let searchPos = 0
+  let firstIndex = -1
+  let lastEnd = 0
+  for (const token of tokens) {
+    const index = lower.indexOf(token.toLowerCase(), searchPos)
+    if (index === -1) return truncate(haystack, radius * 2)
+    if (firstIndex === -1) firstIndex = index
+    searchPos = index + token.length
+    lastEnd = searchPos
+  }
+  const start = Math.max(0, firstIndex - radius)
+  const end = Math.min(haystack.length, lastEnd + radius)
   return `${start > 0 ? "..." : ""}${haystack.slice(start, end)}${end < haystack.length ? "..." : ""}`
 }
 
@@ -236,15 +246,27 @@ function findMatch(text: string, query: string, radius = 96) {
       excerpt: collapsed.slice(0, end),
     }
   }
-  const start = text.toLowerCase().indexOf(needle.toLowerCase())
-  if (start === -1) return
-  const end = start + needle.length
+  const tokens = needle.split(/\s+/)
+  const lowerText = text.toLowerCase()
+  let searchPos = 0
+  let firstStart = -1
+  let lastEnd = -1
+  for (const token of tokens) {
+    const pos = lowerText.indexOf(token.toLowerCase(), searchPos)
+    if (pos === -1) return
+    if (firstStart === -1) firstStart = pos
+    searchPos = pos + token.length
+    lastEnd = searchPos
+  }
+  const start = firstStart
+  const end = lastEnd
   const lineStart = text.lastIndexOf("\n", start - 1) + 1
   const nextLine = text.indexOf("\n", end)
   const lineEnd = nextLine === -1 ? text.length : nextLine
   const line = text.slice(lineStart, lineEnd)
+  const matchLen = end - start
   const lineMatchStart = Math.max(0, start - lineStart)
-  const lineMatchEnd = lineMatchStart + needle.length
+  const lineMatchEnd = lineMatchStart + matchLen
   const excerptStart = Math.max(0, lineMatchStart - radius)
   const excerptEnd = Math.min(line.length, lineMatchEnd + radius)
   const before = normalizeSnippetSegment(line.slice(excerptStart, lineMatchStart))
@@ -387,29 +409,26 @@ function searchRows(db: Database, query: string, limit: number, directory?: stri
 
 function visibleTextRows(db: Database, limit: number, query?: string, directory?: string, offset?: number) {
   const offsetClause = offset ? "OFFSET ?" : ""
-  if (query) {
-    const params: (string | number)[] = directory ? [directory, `%${query}%`, limit] : [`%${query}%`, limit]
-    if (offset) params.push(offset)
-    return db
-      .query<Row, (string | number)[]>(`
-        SELECT p.id, p.message_id, p.session_id, s.title AS session_title, s.directory,
-               json_extract(m.data, '$.role') AS role,
-               p.time_created,
-               json_extract(p.data, '$.text') AS text
-        FROM part p
-        JOIN message m ON m.id = p.message_id
-        JOIN session s ON s.id = p.session_id
-        WHERE json_extract(p.data, '$.type') = 'text'
-          AND json_extract(m.data, '$.role') IN ('user', 'assistant')
-          ${directory ? "AND s.directory = ?" : ""}
-          AND json_extract(p.data, '$.text') LIKE ?
-        ORDER BY p.time_created DESC
-        LIMIT ? ${offsetClause}
-      `)
-      .all(...params as [string, string, number] | [string, number])
+  const conditions: string[] = [
+    "json_extract(p.data, '$.type') = 'text'",
+    "json_extract(m.data, '$.role') IN ('user', 'assistant')",
+  ]
+  const params: (string | number)[] = []
+
+  if (directory) {
+    conditions.push("s.directory = ?")
+    params.push(directory)
   }
-  const params: (string | number)[] = directory ? [directory, limit] : [limit]
+
+  const tokens = query ? query.trim().split(/\s+/).filter(Boolean) : []
+  for (const token of tokens) {
+    conditions.push("json_extract(p.data, '$.text') LIKE ?")
+    params.push(`%${token}%`)
+  }
+
+  params.push(limit)
   if (offset) params.push(offset)
+
   return db
     .query<Row, (string | number)[]>(`
       SELECT p.id, p.message_id, p.session_id, s.title AS session_title, s.directory,
@@ -419,13 +438,11 @@ function visibleTextRows(db: Database, limit: number, query?: string, directory?
       FROM part p
       JOIN message m ON m.id = p.message_id
       JOIN session s ON s.id = p.session_id
-      WHERE json_extract(p.data, '$.type') = 'text'
-        AND json_extract(m.data, '$.role') IN ('user', 'assistant')
-        ${directory ? "AND s.directory = ?" : ""}
+      WHERE ${conditions.join(" AND ")}
       ORDER BY p.time_created DESC
       LIMIT ? ${offsetClause}
     `)
-    .all(...params as [string, number] | [number])
+    .all(...params as any[])
 }
 
 function tableExists(db: Database, name: string) {

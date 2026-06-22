@@ -228,10 +228,20 @@ function searchResultPreviewPart(item: SearchResult): ConversationPreviewPart {
 }
 
 function conversationMatch(part: ConversationPreviewPart, item: SearchResult) {
-  if (!part.target) return
-  const index = part.text.toLowerCase().indexOf(item.match.toLowerCase())
-  if (index === -1 || !item.match) return
-  return { start: index, end: index + item.match.length }
+  if (!part.target || !item.match) return
+  const tokens = item.match.split(/\s+/)
+  const lowerText = part.text.toLowerCase()
+  let searchPos = 0
+  let firstStart = -1
+  let lastEnd = -1
+  for (const token of tokens) {
+    const index = lowerText.indexOf(token.toLowerCase(), searchPos)
+    if (index === -1) return
+    if (firstStart === -1) firstStart = index
+    searchPos = index + token.length
+    lastEnd = searchPos
+  }
+  return { start: firstStart, end: lastEnd }
 }
 
 function conversationMarkdown(part: ConversationPreviewPart, item: SearchResult) {
@@ -243,14 +253,23 @@ function conversationMarkdown(part: ConversationPreviewPart, item: SearchResult)
 function matchExcerpt(text: string, query: string, radius = 80) {
   const needle = query.trim()
   if (!needle) return
-  const start = text.toLowerCase().indexOf(needle.toLowerCase())
-  if (start === -1) return
-  const end = start + needle.length
-  const beforeStart = Math.max(0, start - radius)
-  const afterEnd = Math.min(text.length, end + radius)
+  const tokens = needle.split(/\s+/)
+  const lowerText = text.toLowerCase()
+  let searchPos = 0
+  let firstStart = -1
+  let lastEnd = -1
+  for (const token of tokens) {
+    const start = lowerText.indexOf(token.toLowerCase(), searchPos)
+    if (start === -1) return
+    if (firstStart === -1) firstStart = start
+    searchPos = start + token.length
+    lastEnd = searchPos
+  }
+  const beforeStart = Math.max(0, firstStart - radius)
+  const afterEnd = Math.min(text.length, lastEnd + radius)
   return {
-    before: `${beforeStart > 0 ? "..." : ""}${text.slice(beforeStart, start).replace(/\s+/g, " ")}`,
-    match: text.slice(start, end),
-    after: `${text.slice(end, afterEnd).replace(/\s+/g, " ")}${afterEnd < text.length ? "..." : ""}`,
+    before: `${beforeStart > 0 ? "..." : ""}${text.slice(beforeStart, firstStart).replace(/\s+/g, " ")}`,
+    match: text.slice(firstStart, lastEnd),
+    after: `${text.slice(lastEnd, afterEnd).replace(/\s+/g, " ")}${afterEnd < text.length ? "..." : ""}`,
   }
 }
