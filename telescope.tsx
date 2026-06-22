@@ -142,14 +142,18 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
   let lastPreviewItemId = ""
   createEffect(() => {
     const item = selectedResult()
-    const range = previewRange()
-    if (!item) {
-      setPreviewParts([])
-      return
-    }
+    if (!item) return
     if (item.id !== lastPreviewItemId) {
       lastPreviewItemId = item.id
       setPreviewRange({ before: INITIAL_PREVIEW_BEFORE, after: INITIAL_PREVIEW_AFTER })
+    }
+  })
+
+  createEffect(() => {
+    const item = selectedResult()
+    const range = previewRange()
+    if (!item) {
+      setPreviewParts([])
       return
     }
     const db = dbPath()
@@ -180,8 +184,8 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
     const item = selectedResult()
     previewParts()
     if (!item) return
-    const timer = setTimeout(() => scrollPreviewToTarget(previewScroll, messageTargetID(item)), 1)
-    onCleanup(() => clearTimeout(timer))
+    if (previewParts().length === 0) return
+    queueMicrotask(() => scrollPreviewToTarget(previewScroll, messageTargetID(item)))
   })
 
   const open = () => {
