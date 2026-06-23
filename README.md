@@ -4,7 +4,7 @@ Fuzzy search across all your OpenCode conversations — grep through session and
 
 > Inspired by [telescope.nvim](https://github.com/nvim-telescope/telescope.nvim) — a fuzzy finder for your conversation history.
 
-![Demo](./assets/demo.svg)
+![Demo](./assets/demo.png)
 
 ## Use cases
 
@@ -38,13 +38,13 @@ Add the plugin to your `tui.json`:
 
 ## Usage
 
-| Action | Key / Command |
-|--------|--------------|
-| Open search | `<leader>f` or `/telescope` |
-| Type to filter | Fuzzy match against conversation text |
-| Navigate results | `↑` / `↓` or `Ctrl+j` / `Ctrl+k` |
-| Preview | Select a result to see the conversation preview |
-| Open | Press `Enter` to jump to the selected session |
+| Action           | Key / Command                                   |
+| ---------------- | ----------------------------------------------- |
+| Open search      | `<leader>f` or `/telescope`                     |
+| Type to filter   | Fuzzy match against conversation text           |
+| Navigate results | `↑` / `↓` or `Ctrl+j` / `Ctrl+k`                |
+| Preview          | Select a result to see the conversation preview |
+| Open             | Press `Enter` to jump to the selected session   |
 
 ## How it works
 
