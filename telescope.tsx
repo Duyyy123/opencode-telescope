@@ -35,8 +35,8 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
   const [hasMorePreviewBefore, setHasMorePreviewBefore] = createSignal(false)
   const [hasMorePreviewAfter, setHasMorePreviewAfter] = createSignal(false)
   const [loadingPreviewMore, setLoadingPreviewMore] = createSignal(false)
-  const BATCH_SIZE = 25
-  const RECENT_BATCH_SIZE = 15
+  const MIN_SEARCH_BATCH_SIZE = 25
+  const MIN_RECENT_BATCH_SIZE = 15
   const INITIAL_PREVIEW_BEFORE = 20
   const INITIAL_PREVIEW_AFTER = 30
   const PREVIEW_PAGE_SIZE = 20
@@ -53,6 +53,15 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
   const verticalOffset = createMemo(() => Math.floor(dimensions().height / 4 - height() / 2) - 2)
   const dbPath = createMemo(() => resolveDatabasePath())
   const directory = props.api.state.path.directory
+  let advanceSelectionAfterLoad = false
+
+  const resultRowHeight = createMemo(() => leftWidth() >= 48 ? 3 : 4)
+  const visibleResultRows = () => {
+    const viewportHeight = resultScroll?.height || Math.max(8, height() - 7)
+    return Math.max(5, Math.floor(viewportHeight / resultRowHeight()))
+  }
+  const searchBatchSize = () => Math.max(MIN_SEARCH_BATCH_SIZE, visibleResultRows() * 2)
+  const recentBatchSize = () => Math.max(MIN_RECENT_BATCH_SIZE, visibleResultRows() * 2)
 
   createEffect(() => {
     const q = query().trim()
@@ -63,12 +72,13 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
 
     if (!q) {
       setLoading(true)
+      const limit = recentBatchSize()
       const timer = setTimeout(() => {
         debug.time("query:recent")
         try {
-          const batch = recentSessionMessages({ limit: RECENT_BATCH_SIZE, offset: 0, dbPath: db, directory: dir })
+          const batch = recentSessionMessages({ limit, offset: 0, dbPath: db, directory: dir })
           setResults(batch)
-          setHasMore(batch.length >= RECENT_BATCH_SIZE)
+          setHasMore(batch.length >= limit)
           setSelected(0)
         } catch (err) {
           setResults([])
@@ -83,12 +93,13 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
 
     setLoading(true)
     setBusy(true)
+    const limit = searchBatchSize()
     const timer = setTimeout(() => {
       debug.time("query:search")
       try {
-        const batch = searchSessionMessages(q, { limit: BATCH_SIZE, offset: 0, dbPath: db, directory: dir })
+        const batch = searchSessionMessages(q, { limit, offset: 0, dbPath: db, directory: dir })
         setResults(batch)
-        setHasMore(batch.length >= BATCH_SIZE)
+        setHasMore(batch.length >= limit)
         setSelected(0)
       } catch (err) {
         setResults([])
@@ -102,14 +113,48 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
     onCleanup(() => clearTimeout(timer))
   })
 
+  const loadMoreResults = (advance = false) => {
+    if (advance) advanceSelectionAfterLoad = true
+    if (!hasMore() || loadingMore() || busy() || loading()) return
+
+    const total = results().length
+    const q = query().trim()
+    const db = dbPath()
+    const dir = directory
+    const limit = q ? searchBatchSize() : recentBatchSize()
+
+    setLoadingMore(true)
+    debug.time("query:load-more")
+    try {
+      const batch = q
+        ? searchSessionMessages(q, { limit, offset: total, dbPath: db, directory: dir })
+        : recentSessionMessages({ limit, offset: total, dbPath: db, directory: dir })
+      setResults((prev) => [...prev, ...batch])
+      if (batch.length < limit) setHasMore(false)
+      if (advanceSelectionAfterLoad) {
+        debug.log("results:advance-after-load", { from: selected(), total, added: batch.length })
+        advanceSelectionAfterLoad = false
+        if (batch.length > 0) setSelected(total)
+      }
+    } catch (err) {
+      debug.log("results:load-more:error", err instanceof Error ? err.message : String(err))
+    } finally {
+      debug.timeEnd("query:load-more")
+      setLoadingMore(false)
+    }
+  }
+
   const move = (delta: number) => {
     if (results().length === 0) return
     setSelected((index) => {
       const next = index + delta
       let finalIndex = next
       if (next < 0) finalIndex = results().length - 1
-      else if (next >= results().length) finalIndex = results().length - 1
-      
+      else if (next >= results().length) {
+        if (hasMore()) loadMoreResults(true)
+        finalIndex = results().length - 1
+      }
+       
       if (finalIndex !== index) debug.time("nav:total")
       return finalIndex
     })
@@ -132,30 +177,12 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
   createEffect(() => {
     const index = selected()
     const total = results().length
-    if (index < total - 3) return
+    const threshold = Math.max(3, visibleResultRows())
+    if (index < total - threshold) return
     if (!hasMore() || loadingMore() || busy() || loading()) return
 
-    const q = query().trim()
-    const db = dbPath()
-    const dir = directory
-
-    setLoadingMore(true)
-    const timer = setTimeout(() => {
-      debug.time("query:load-more")
-      try {
-        const batch = q
-          ? searchSessionMessages(q, { limit: BATCH_SIZE, offset: total, dbPath: db, directory: dir })
-          : recentSessionMessages({ limit: RECENT_BATCH_SIZE, offset: total, dbPath: db, directory: dir })
-        setResults((prev) => [...prev, ...batch])
-        if (batch.length < (q ? BATCH_SIZE : RECENT_BATCH_SIZE)) setHasMore(false)
-      } catch {
-        // keep existing results on error
-      } finally {
-        debug.timeEnd("query:load-more")
-        setLoadingMore(false)
-      }
-    }, 100)
-    onCleanup(() => { clearTimeout(timer); setLoadingMore(false) })
+    const timer = setTimeout(() => loadMoreResults(false), 100)
+    onCleanup(() => clearTimeout(timer))
   })
 
   const previewContentHeight = () => {
@@ -164,7 +191,7 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
     return lastChild ? lastChild.y + lastChild.height : 0
   }
 
-  const loadPreviewBefore = (previousContentHeight = previewContentHeight()) => {
+  const loadPreviewBefore = (previousContentHeight = previewContentHeight(), preserveScroll = true) => {
     const item = selectedResult()
     const first = previewParts()[0]
     if (!item || !first || loadingPreviewMore()) return
@@ -176,15 +203,18 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
         item: item.id,
         added: page.parts.length,
         hasMoreBefore: page.hasMoreBefore,
+        preserveScroll,
         first: page.parts[0]?.id,
         last: page.parts.at(-1)?.id,
       })
       if (page.parts.length > 0) {
         setPreviewParts((prev) => [...page.parts, ...prev])
-        setTimeout(() => {
-          const delta = previewContentHeight() - previousContentHeight
-          if (delta > 0) previewScroll?.scrollBy(delta)
-        }, 1)
+        if (preserveScroll) {
+          setTimeout(() => {
+            const delta = previewContentHeight() - previousContentHeight
+            if (delta > 0) previewScroll?.scrollBy(delta)
+          }, 1)
+        }
       }
       setHasMorePreviewBefore(page.hasMoreBefore)
     } catch (err) {
@@ -264,20 +294,22 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
       const lastChild = children[children.length - 1] as { y: number; height: number }
       const totalContentHeight = lastChild.y + lastChild.height
       const atTop = scroll.y <= 0
+      const nearTop = scroll.y <= 2
       const atBottom = scroll.y + scroll.height >= totalContentHeight - 1
-      if (atTop || atBottom) {
+      if (nearTop || atBottom) {
         debug.log("preview:scroll-edge", {
           y: scroll.y,
           height: scroll.height,
           contentHeight: totalContentHeight,
           atTop,
+          nearTop,
           atBottom,
           hasMoreBefore: hasMorePreviewBefore(),
           hasMoreAfter: hasMorePreviewAfter(),
           children: children.length,
         })
       }
-      if (atTop && hasMorePreviewBefore()) loadPreviewBefore(totalContentHeight)
+      if (nearTop && hasMorePreviewBefore()) loadPreviewBefore(totalContentHeight, !atTop)
       if (atBottom && hasMorePreviewAfter()) loadPreviewAfter()
     }, 400)
     onCleanup(() => clearInterval(interval))
