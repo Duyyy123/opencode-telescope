@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite"
-import { existsSync, readdirSync } from "node:fs"
+import { existsSync, readdirSync, statSync } from "node:fs"
 import { homedir } from "node:os"
 import path from "node:path"
 import { debug } from "./ui/debug.ts"
@@ -71,6 +71,8 @@ type ConversationRow = {
 let cachedDbPath: string | undefined
 let _db: Database | undefined
 let _dbPath: string | undefined
+let _indexDb: Database | undefined
+let _indexDbPath: string | undefined
 
 function getDb(dbPath?: string): Database {
   const resolved = dbPath ?? resolveDatabasePath()
@@ -118,8 +120,9 @@ export function searchSessionMessages(query: string, options?: { limit?: number;
   const term = query.trim()
   if (!term) return []
   if (options?.dbPath === ":memory:") return []
-  const db = getDb(options?.dbPath)
-  return searchRows(db, term, options?.limit ?? 80, options?.directory, options?.offset)
+  const dbPath = options?.dbPath ?? resolveDatabasePath()
+  const db = getDb(dbPath)
+  return searchRows(db, dbPath, term, options?.limit ?? 80, options?.directory, options?.offset)
 }
 
 export function recentSessionMessages(options?: { limit?: number; offset?: number; dbPath?: string; directory?: string }) {
@@ -418,15 +421,46 @@ function parseToolState(value: unknown): ToolState | undefined {
   }
 }
 
-function searchRows(db: Database, query: string, limit: number, directory?: string, offset?: number) {
+function searchRows(db: Database, dbPath: string, query: string, limit: number, directory?: string, offset?: number) {
   if (!tableExists(db, "part") || !tableExists(db, "message")) return []
   debug.time("query:sql")
-  const rows = visibleTextRows(db, limit, query, directory, offset)
+  const rows = indexedTextRows(db, dbPath, limit, query, directory, offset) ?? visibleTextRows(db, limit, query, directory, offset)
   debug.timeEnd("query:sql")
   debug.time("query:map")
   const results = rows.flatMap((row) => rowToSearchResult(row, query) ?? [])
   debug.timeEnd("query:map")
   return results
+}
+
+function indexedTextRows(db: Database, dbPath: string, limit: number, query: string, directory?: string, offset?: number) {
+  const match = ftsQuery(query)
+  if (!match) return []
+  try {
+    const index = ensureSearchIndex(db, dbPath)
+    const conditions = ["document_fts MATCH ?"]
+    const params: (string | number)[] = [match]
+    if (directory) {
+      conditions.push("directory = ?")
+      params.push(directory)
+    }
+    params.push(limit)
+    if (offset) params.push(offset)
+    const offsetClause = offset ? "OFFSET ?" : ""
+    debug.time("query:fts:exec")
+    const rows = index.query<Row, (string | number)[]>(`
+      SELECT id, message_id, session_id, session_title, directory, role,
+             CAST(time_created AS INTEGER) AS time_created, text
+      FROM document_fts
+      WHERE ${conditions.join(" AND ")}
+      ORDER BY bm25(document_fts), CAST(time_created AS INTEGER) DESC
+      LIMIT ? ${offsetClause}
+    `).all(...params as any[])
+    debug.timeEnd("query:fts:exec")
+    return rows
+  } catch (err) {
+    debug.log("fts:fallback", err instanceof Error ? err.message : String(err))
+    return
+  }
 }
 
 function visibleTextRows(db: Database, limit: number, query?: string, directory?: string, offset?: number) {
@@ -467,6 +501,121 @@ function visibleTextRows(db: Database, limit: number, query?: string, directory?
   const rows = db.query<Row, (string | number)[]>(sql).all(...params as any[])
   debug.timeEnd("query:sql:exec")
   return rows
+}
+
+function ensureSearchIndex(source: Database, sourcePath: string) {
+  const indexPath = searchIndexPath(sourcePath)
+  if (!_indexDb || _indexDbPath !== indexPath) {
+    _indexDb?.close()
+    _indexDb = new Database(indexPath)
+    _indexDbPath = indexPath
+    migrateSearchIndex(_indexDb)
+  }
+
+  const state = sourceState(source, sourcePath)
+  const currentDataVersion = getMeta(_indexDb, "source_data_version")
+  const currentMtimeMs = getMeta(_indexDb, "source_mtime_ms")
+  const currentPath = getMeta(_indexDb, "source_path")
+  if (currentPath !== sourcePath || currentDataVersion !== String(state.dataVersion) || currentMtimeMs !== String(state.mtimeMs)) {
+    rebuildSearchIndex(source, _indexDb, sourcePath, state)
+  }
+  return _indexDb
+}
+
+function searchIndexPath(sourcePath: string) {
+  const parsed = path.parse(sourcePath)
+  return path.join(parsed.dir, `${parsed.name}-search.db`)
+}
+
+function migrateSearchIndex(db: Database) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS index_meta(
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
+    CREATE VIRTUAL TABLE IF NOT EXISTS document_fts USING fts5(
+      id UNINDEXED,
+      message_id UNINDEXED,
+      session_id UNINDEXED,
+      session_title,
+      directory UNINDEXED,
+      role UNINDEXED,
+      time_created UNINDEXED,
+      text,
+      tokenize='unicode61'
+    );
+  `)
+}
+
+function sourceState(db: Database, sourcePath: string) {
+  const stat = statSync(sourcePath)
+  const dataVersion = db.query<{ data_version: number }, []>("PRAGMA data_version").get()?.data_version ?? 0
+  return { dataVersion, mtimeMs: stat.mtimeMs }
+}
+
+function rebuildSearchIndex(source: Database, index: Database, sourcePath: string, state: { dataVersion: number; mtimeMs: number }) {
+  debug.time("fts:rebuild")
+  const rows = source.query<Row, []>(`
+    SELECT p.id, p.message_id, p.session_id, s.title AS session_title, s.directory,
+           json_extract(m.data, '$.role') AS role,
+           p.time_created,
+           json_extract(p.data, '$.text') AS text
+    FROM part p
+    JOIN message m ON m.id = p.message_id
+    JOIN session s ON s.id = p.session_id
+    WHERE json_extract(p.data, '$.type') = 'text'
+      AND json_extract(m.data, '$.role') IN ('user', 'assistant')
+      AND json_extract(p.data, '$.text') IS NOT NULL
+    ORDER BY p.time_created DESC
+  `).all()
+  const insert = index.query<Row, [string, string, string, string, string, string, number, string]>(`
+    INSERT INTO document_fts(id, message_id, session_id, session_title, directory, role, time_created, text)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `)
+  index.exec("BEGIN IMMEDIATE")
+  try {
+    index.exec("DELETE FROM document_fts")
+    for (const row of rows) {
+      insert.run(
+        row.id,
+        row.message_id,
+        row.session_id,
+        row.session_title ?? "Untitled session",
+        row.directory,
+        row.role,
+        row.time_created,
+        row.text,
+      )
+    }
+    setMeta(index, "source_path", sourcePath)
+    setMeta(index, "source_data_version", String(state.dataVersion))
+    setMeta(index, "source_mtime_ms", String(state.mtimeMs))
+    index.exec("COMMIT")
+  } catch (err) {
+    index.exec("ROLLBACK")
+    throw err
+  } finally {
+    debug.timeEnd("fts:rebuild")
+  }
+}
+
+function ftsQuery(query: string) {
+  const tokens = query.trim().split(/\s+/)
+    .map((token) => token.replace(/["*^:()]/g, " ").trim())
+    .filter(Boolean)
+  if (!tokens.length) return ""
+  return tokens.map((token) => `"${token.replace(/"/g, '""')}"*`).join(" AND ")
+}
+
+function getMeta(db: Database, key: string) {
+  return db.query<{ value: string }, [string]>("SELECT value FROM index_meta WHERE key = ?").get(key)?.value
+}
+
+function setMeta(db: Database, key: string, value: string) {
+  db.query<unknown, [string, string]>(`
+    INSERT INTO index_meta(key, value) VALUES (?, ?)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+  `).run(key, value)
 }
 
 const tableCache = new Map<string, boolean>()

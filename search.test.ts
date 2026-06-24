@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test"
-import { extractSearchText, makeSnippet, rowToSearchResult } from "./search"
+import { Database } from "bun:sqlite"
+import { mkdtempSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import path from "node:path"
+import { extractSearchText, makeSnippet, rowToSearchResult, searchSessionMessages } from "./search"
 
 describe("session search helpers", () => {
   test("extracts user message text", () => {
@@ -119,5 +123,36 @@ describe("session search helpers", () => {
     const snippet = makeSnippet(text, "let me")
     expect(snippet).toContain("let")
     expect(snippet).toContain("me")
+  })
+
+  test("searches through the FTS sidecar and rebuilds after source changes", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "opencode-telescope-"))
+    const dbPath = path.join(dir, "opencode.db")
+    const db = new Database(dbPath)
+    try {
+      db.exec(`
+        CREATE TABLE session(id TEXT PRIMARY KEY, title TEXT, directory TEXT);
+        CREATE TABLE message(id TEXT PRIMARY KEY, session_id TEXT, data TEXT);
+        CREATE TABLE part(id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT);
+      `)
+      db.query("INSERT INTO session(id, title, directory) VALUES (?, ?, ?)").run("ses_1", "Test", dir)
+      db.query("INSERT INTO session(id, title, directory) VALUES (?, ?, ?)").run("ses_2", "Other", path.join(dir, "other"))
+      db.query("INSERT INTO message(id, session_id, data) VALUES (?, ?, ?)").run("msg_1", "ses_1", JSON.stringify({ role: "assistant" }))
+      db.query("INSERT INTO message(id, session_id, data) VALUES (?, ?, ?)").run("msg_2", "ses_2", JSON.stringify({ role: "assistant" }))
+      db.query("INSERT INTO part(id, message_id, session_id, time_created, data) VALUES (?, ?, ?, ?, ?)")
+        .run("prt_1", "msg_1", "ses_1", 1, JSON.stringify({ type: "text", text: "needle alpha" }))
+      db.query("INSERT INTO part(id, message_id, session_id, time_created, data) VALUES (?, ?, ?, ?, ?)")
+        .run("prt_3", "msg_2", "ses_2", 3, JSON.stringify({ type: "text", text: "needle gamma" }))
+
+      expect(searchSessionMessages("needle", { dbPath, directory: dir, limit: 10 }).map((item) => item.id)).toEqual(["prt_1"])
+
+      db.query("INSERT INTO part(id, message_id, session_id, time_created, data) VALUES (?, ?, ?, ?, ?)")
+        .run("prt_2", "msg_1", "ses_1", 2, JSON.stringify({ type: "text", text: "second beta" }))
+
+      expect(searchSessionMessages("second", { dbPath, limit: 10 }).map((item) => item.id)).toEqual(["prt_2"])
+    } finally {
+      db.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })
