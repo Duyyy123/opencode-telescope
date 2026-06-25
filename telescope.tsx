@@ -14,6 +14,7 @@ import {
   searchSessionMessages,
   type ConversationPreviewPart,
   type SearchResult,
+  type SearchRole,
 } from "./search.ts"
 import { debug } from "./ui/debug.ts"
 import { syntaxStyle } from "./ui/format.ts"
@@ -21,8 +22,10 @@ import { isKey, prevent } from "./ui/keyboard.ts"
 import { jumpToRenderedTarget, messageTargetID, previewScrollAmount, scrollPreviewToTarget } from "./ui/render-target.ts"
 
 export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => {
+  type OwnerFilter = "all" | SearchRole
   const dimensions = useTerminalDimensions()
   const [query, setQuery] = createSignal("")
+  const [ownerFilter, setOwnerFilter] = createSignal<OwnerFilter>("all")
   const [results, setResults] = createSignal<SearchResult[]>([])
   const [previewParts, setPreviewParts] = createSignal<ConversationPreviewPart[]>([])
   const [selected, setSelected] = createSignal(0)
@@ -45,7 +48,8 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
   const MIN_SEARCH_BATCH_SIZE = 25
   const MIN_RECENT_BATCH_SIZE = 15
   const RESULT_OVERSCAN_MULTIPLIER = 2
-  const RESULT_PREFETCH_VIEWPORTS = 3
+  const RESULT_BATCH_VIEWPORTS = 4
+  const RESULT_PREFETCH_VIEWPORTS = 10
   const RESULT_CACHE_BEHIND_VIEWPORTS = 6
   const INITIAL_PREVIEW_BEFORE = 20
   const INITIAL_PREVIEW_AFTER = 30
@@ -57,6 +61,9 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
 
   const theme = createMemo(() => props.api.theme.current)
   const syntax = createMemo(() => syntaxStyle(theme()))
+  const ownerRole = createMemo(() => ownerFilter() === "all" ? undefined : ownerFilter() as SearchRole)
+  const ownerLabel = createMemo(() => ownerFilter() === "user" ? "you" : ownerFilter())
+  const normalHelpItems = ["j/k move", "d/u scroll", "o owner", "/ search", "enter open", "q close"]
   const selectedResult = createMemo(() => results()[selected() - resultBaseOffset()])
   const popupWidth = createMemo(() => Math.max(72, Math.min(dimensions().width - 2, Math.floor(dimensions().width * 0.92))))
   const leftWidth = createMemo(() => Math.max(36, Math.min(64, Math.floor(popupWidth() * 0.36))))
@@ -94,9 +101,15 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
     const viewportHeight = resultScroll?.height || Math.max(8, height() - 7)
     return Math.max(5, Math.floor(viewportHeight / resultRowHeight()))
   }
-  const searchBatchSize = () => Math.max(MIN_SEARCH_BATCH_SIZE, visibleResultRows() * 2)
-  const recentBatchSize = () => Math.max(MIN_RECENT_BATCH_SIZE, visibleResultRows() * 2)
-  const resultPrefetchThreshold = () => Math.max(visibleResultRows() * RESULT_PREFETCH_VIEWPORTS, searchBatchSize())
+  const searchBatchSize = () => Math.max(MIN_SEARCH_BATCH_SIZE, visibleResultRows() * RESULT_BATCH_VIEWPORTS)
+  const recentBatchSize = () => Math.max(MIN_RECENT_BATCH_SIZE, visibleResultRows() * RESULT_BATCH_VIEWPORTS)
+  const resultPrefetchThreshold = () => visibleResultRows() * RESULT_PREFETCH_VIEWPORTS
+  const resultPrefetchState = () => {
+    const cachedEnd = resultBaseOffset() + results().length
+    const rowsAhead = Math.max(0, cachedEnd - selected() - 1)
+    const threshold = resultPrefetchThreshold()
+    return { cachedEnd, rowsAhead, threshold, shouldPrefetch: rowsAhead <= threshold }
+  }
   const trimResultCache = (items: SearchResult[], anchorIndex: number) => {
     const base = resultBaseOffset()
     const keepBehind = visibleResultRows() * RESULT_CACHE_BEHIND_VIEWPORTS
@@ -141,6 +154,7 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
 
   createEffect(() => {
     const q = query().trim()
+    const role = ownerRole()
     setError("")
     setHasMore(true)
     if (resultPrefetchTimer) clearTimeout(resultPrefetchTimer)
@@ -161,7 +175,7 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
       const timer = setTimeout(() => {
         debug.time("query:recent")
         try {
-          const batch = recentSessionMessages({ limit, offset: 0, dbPath: db, directory: dir })
+          const batch = recentSessionMessages({ limit, offset: 0, dbPath: db, directory: dir, role })
           solidBatch(() => {
             setResults(batch)
             setResultBaseOffset(0)
@@ -192,7 +206,7 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
     const timer = setTimeout(() => {
       debug.time("query:search")
       try {
-        const batch = searchSessionMessages(q, { limit, offset: 0, dbPath: db, directory: dir })
+        const batch = searchSessionMessages(q, { limit, offset: 0, dbPath: db, directory: dir, role })
         solidBatch(() => {
           setResults(batch)
           setResultBaseOffset(0)
@@ -228,6 +242,7 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
 
     const offset = nextResultOffset()
     const q = query().trim()
+    const role = ownerRole()
     const db = dbPath()
     const dir = directory
     const limit = q ? searchBatchSize() : recentBatchSize()
@@ -236,8 +251,8 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
     debug.time("query:load-more")
     try {
       const batch = q
-        ? searchSessionMessages(q, { limit, offset, dbPath: db, directory: dir })
-        : recentSessionMessages({ limit, offset, dbPath: db, directory: dir })
+        ? searchSessionMessages(q, { limit, offset, dbPath: db, directory: dir, role })
+        : recentSessionMessages({ limit, offset, dbPath: db, directory: dir, role })
       const nextHasMore = batch.length >= limit
       const nextLoadedUntil = offset + batch.length
       const previousSelected = selected()
@@ -285,6 +300,7 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
     if (loadingMore() || loadingPreviousResults() || prefetchingResults() || busy() || loading()) return
 
     const q = query().trim()
+    const role = ownerRole()
     const db = dbPath()
     const dir = directory
     const pageSize = q ? searchBatchSize() : recentBatchSize()
@@ -295,8 +311,8 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
     debug.time("query:load-before")
     try {
       const batch = q
-        ? searchSessionMessages(q, { limit, offset, dbPath: db, directory: dir })
-        : recentSessionMessages({ limit, offset, dbPath: db, directory: dir })
+        ? searchSessionMessages(q, { limit, offset, dbPath: db, directory: dir, role })
+        : recentSessionMessages({ limit, offset, dbPath: db, directory: dir, role })
       const nextSelected = advanceSelectionBeforeLoad && batch.length > 0 ? base - 1 : selected()
       debug.log("results:load-before", { offset, limit, added: batch.length, fromBase: base, toBase: offset, cached: results().length + batch.length, advance })
       const shouldAdvance = advanceSelectionBeforeLoad
@@ -336,6 +352,8 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
     }, 1)
   }
 
+  let lastResultPrefetchDecision = ""
+
   const move = (delta: number) => {
     if (results().length === 0) return
     setSelected((index) => {
@@ -374,11 +392,26 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
   })
 
   createEffect(() => {
-    const index = selected()
-    const total = resultBaseOffset() + results().length
-    const threshold = resultPrefetchThreshold()
-    if (index < total - threshold) return
-    if (!hasMore() || loadingMore() || loadingPreviousResults() || prefetchingResults() || busy() || loading()) return
+    const state = resultPrefetchState()
+    const blockedBy = !hasMore()
+      ? "no-more"
+      : loadingMore()
+        ? "loading-more"
+        : loadingPreviousResults()
+          ? "loading-before"
+          : prefetchingResults()
+            ? "prefetching"
+            : busy()
+              ? "busy"
+              : loading()
+                ? "loading"
+                : ""
+    const decisionKey = `${selected()}:${state.cachedEnd}:${state.rowsAhead}:${state.threshold}:${blockedBy}:${state.shouldPrefetch}`
+    if (decisionKey !== lastResultPrefetchDecision) {
+      lastResultPrefetchDecision = decisionKey
+      debug.log("results:prefetch-decision", { selected: selected(), ...state, blockedBy: blockedBy || undefined })
+    }
+    if (!state.shouldPrefetch || blockedBy) return
 
     const timer = setTimeout(() => scheduleResultPrefetch(false), 100)
     onCleanup(() => clearTimeout(timer))
@@ -590,12 +623,22 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
     el?.blur?.()
   }
 
+  const toggleOwnerFilter = () => {
+    setOwnerFilter((filter) => filter === "all" ? "user" : filter === "user" ? "assistant" : "all")
+  }
+
   useKeyboard((evt) => {
     if (!props.api.ui.dialog.open) return
 
     if (isKey(evt, "down") || isKey(evt, "up")) {
       prevent(evt)
       isKey(evt, "down") ? move(1) : move(-1)
+      return
+    }
+
+    if (isKey(evt, "enter", "return")) {
+      prevent(evt)
+      open()
       return
     }
 
@@ -623,15 +666,15 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
         scrollPreview(-1, evt)
         return
       }
+      if (isKey(evt, "o")) {
+        prevent(evt)
+        toggleOwnerFilter()
+        return
+      }
       if (isKey(evt, "/")) {
         prevent(evt)
         setMode("insert")
         focusInput()
-        return
-      }
-      if (isKey(evt, "enter", "return")) {
-        prevent(evt)
-        open()
         return
       }
     }
@@ -669,6 +712,11 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
                       isKey(evt, "down") ? move(1) : move(-1)
                       return
                     }
+                    if (isKey(evt, "enter", "return")) {
+                      prevent(evt)
+                      open()
+                      return
+                    }
                     if (evt.ctrl && isKey(evt, "q")) {
                       prevent(evt)
                       setMode("normal")
@@ -677,7 +725,7 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
                   }}
                   flexGrow={1}
                 />
-                <text fg={theme().textMuted}>{busy() ? "searching" : loading() ? "loading..." : query().trim() ? (results().length > 0 ? `${selected() + 1}/${nextResultOffset()} hits` : "0 hits") : (results().length > 0 ? `${selected() + 1}/${nextResultOffset()} recent` : "0 recent")}</text>
+                <text fg={theme().textMuted}>{busy() ? `searching ${ownerLabel()}` : loading() ? `loading ${ownerLabel()}` : query().trim() ? (results().length > 0 ? `${ownerLabel()} ${selected() + 1}/${nextResultOffset()} hits` : `${ownerLabel()} 0 hits`) : (results().length > 0 ? `${ownerLabel()} ${selected() + 1}/${nextResultOffset()} recent` : `${ownerLabel()} 0 recent`)}</text>
               </box>
             </box>
 
@@ -694,7 +742,7 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
                     }
                   >
                     <Show when={!loading()}>
-                      <Show when={results().length > 0} fallback={<EmptyState query={query()} theme={theme()} />}>
+                      <Show when={results().length > 0} fallback={<EmptyState query={query()} owner={ownerLabel()} theme={theme()} />}>
                         <For each={resultRenderWindow().items}>
                           {(item, index) => {
                             const absoluteIndex = () => resultRenderWindow().start + index()
@@ -746,16 +794,14 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
             <Show when={mode() === "normal"}>
               <box paddingLeft={4} paddingRight={4} flexDirection="row" backgroundColor={theme().backgroundElement} gap={2}>
                 <text fg={theme().accent}><span style={{ bold: true }}>NORMAL</span></text>
-                <text fg={theme().textMuted}>·</text>
-                <text fg={theme().text}>j/k move</text>
-                <text fg={theme().textMuted}>·</text>
-                <text fg={theme().textMuted}>d/u scroll</text>
-                <text fg={theme().textMuted}>·</text>
-                <text fg={theme().text}>/ search</text>
-                <text fg={theme().textMuted}>·</text>
-                <text fg={theme().textMuted}>enter open</text>
-                <text fg={theme().textMuted}>·</text>
-                <text fg={theme().text}>q close</text>
+                <For each={normalHelpItems}>
+                  {(item, index) => (
+                    <>
+                      <text fg={theme().textMuted}>·</text>
+                      <text fg={index() % 2 === 0 ? theme().text : theme().textMuted}>{item}</text>
+                    </>
+                  )}
+                </For>
               </box>
             </Show>
             <Show when={mode() === "insert"}>

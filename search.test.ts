@@ -9,6 +9,7 @@ import {
   loadConversationAround,
   loadConversationBefore,
   makeSnippet,
+  recentSessionMessages,
   rowToSearchResult,
   searchSessionMessages,
   type SearchResult,
@@ -148,17 +149,49 @@ describe("session search helpers", () => {
       db.query("INSERT INTO session(id, title, directory) VALUES (?, ?, ?)").run("ses_2", "Other", path.join(dir, "other"))
       db.query("INSERT INTO message(id, session_id, data) VALUES (?, ?, ?)").run("msg_1", "ses_1", JSON.stringify({ role: "assistant" }))
       db.query("INSERT INTO message(id, session_id, data) VALUES (?, ?, ?)").run("msg_2", "ses_2", JSON.stringify({ role: "assistant" }))
+      db.query("INSERT INTO message(id, session_id, data) VALUES (?, ?, ?)").run("msg_3", "ses_1", JSON.stringify({ role: "user" }))
       db.query("INSERT INTO part(id, message_id, session_id, time_created, data) VALUES (?, ?, ?, ?, ?)")
         .run("prt_1", "msg_1", "ses_1", 1, JSON.stringify({ type: "text", text: "needle alpha" }))
       db.query("INSERT INTO part(id, message_id, session_id, time_created, data) VALUES (?, ?, ?, ?, ?)")
         .run("prt_3", "msg_2", "ses_2", 3, JSON.stringify({ type: "text", text: "needle gamma" }))
+      db.query("INSERT INTO part(id, message_id, session_id, time_created, data) VALUES (?, ?, ?, ?, ?)")
+        .run("prt_4", "msg_3", "ses_1", 4, JSON.stringify({ type: "text", text: "needle user" }))
 
-      expect(searchSessionMessages("needle", { dbPath, directory: dir, limit: 10 }).map((item) => item.id)).toEqual(["prt_1"])
+      expect(searchSessionMessages("needle", { dbPath, directory: dir, limit: 10 }).map((item) => item.id)).toEqual(["prt_4", "prt_1"])
+      expect(searchSessionMessages("needle", { dbPath, directory: dir, limit: 10, role: "assistant" }).map((item) => item.id)).toEqual(["prt_1"])
+      expect(searchSessionMessages("needle", { dbPath, directory: dir, limit: 10, role: "user" }).map((item) => item.id)).toEqual(["prt_4"])
 
       db.query("INSERT INTO part(id, message_id, session_id, time_created, data) VALUES (?, ?, ?, ?, ?)")
         .run("prt_2", "msg_1", "ses_1", 2, JSON.stringify({ type: "text", text: "second beta" }))
 
       expect(searchSessionMessages("second", { dbPath, limit: 10 }).map((item) => item.id)).toEqual(["prt_2"])
+    } finally {
+      db.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("filters recent messages by role", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "opencode-telescope-role-"))
+    const dbPath = path.join(dir, "opencode.db")
+    const db = new Database(dbPath)
+    try {
+      db.exec(`
+        CREATE TABLE session(id TEXT PRIMARY KEY, title TEXT, directory TEXT);
+        CREATE TABLE message(id TEXT PRIMARY KEY, session_id TEXT, data TEXT);
+        CREATE TABLE part(id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT);
+      `)
+      db.query("INSERT INTO session(id, title, directory) VALUES (?, ?, ?)").run("ses_1", "Test", dir)
+      db.query("INSERT INTO message(id, session_id, data) VALUES (?, ?, ?)").run("msg_1", "ses_1", JSON.stringify({ role: "assistant" }))
+      db.query("INSERT INTO message(id, session_id, data) VALUES (?, ?, ?)").run("msg_2", "ses_1", JSON.stringify({ role: "user" }))
+      db.query("INSERT INTO part(id, message_id, session_id, time_created, data) VALUES (?, ?, ?, ?, ?)")
+        .run("prt_1", "msg_1", "ses_1", 1, JSON.stringify({ type: "text", text: "assistant text" }))
+      db.query("INSERT INTO part(id, message_id, session_id, time_created, data) VALUES (?, ?, ?, ?, ?)")
+        .run("prt_2", "msg_2", "ses_1", 2, JSON.stringify({ type: "text", text: "user text" }))
+
+      expect(recentSessionMessages({ dbPath, limit: 10 }).map((item) => item.id)).toEqual(["prt_2", "prt_1"])
+      expect(recentSessionMessages({ dbPath, limit: 10, role: "user" }).map((item) => item.id)).toEqual(["prt_2"])
+      expect(recentSessionMessages({ dbPath, limit: 10, role: "assistant" }).map((item) => item.id)).toEqual(["prt_1"])
     } finally {
       db.close()
       rmSync(dir, { recursive: true, force: true })

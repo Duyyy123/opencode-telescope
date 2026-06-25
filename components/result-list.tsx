@@ -54,9 +54,9 @@ export const ResultRow = (props: {
   </box>
 )
 
-export const EmptyState = (props: { query: string; theme: TuiThemeCurrent }) => (
+export const EmptyState = (props: { query: string; owner: string; theme: TuiThemeCurrent }) => (
   <box paddingLeft={1} paddingTop={1}>
-    <text fg={props.theme.textMuted}>{props.query.trim() ? "No matching user/assistant conversation text." : "No recent conversation text found."}</text>
+    <text fg={props.theme.textMuted}>{props.query.trim() ? `No matching ${props.owner} conversation text.` : `No recent ${props.owner} conversation text found.`}</text>
   </box>
 )
 

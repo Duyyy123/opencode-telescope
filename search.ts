@@ -27,6 +27,8 @@ export type SearchResult = {
   text: string
 }
 
+export type SearchRole = "user" | "assistant"
+
 export type ConversationPreviewPart = {
   id: string
   messageID: string
@@ -64,7 +66,7 @@ type Row = {
   session_id: string
   session_title: string | null
   directory: string
-  role: "user" | "assistant"
+  role: SearchRole
   time_created: number
   text: string
 }
@@ -73,7 +75,7 @@ type ConversationRow = {
   id: string
   message_id: string
   session_id: string
-  role: "user" | "assistant"
+  role: SearchRole
   type: "text" | "reasoning" | "tool"
   time_created: number
   data: string
@@ -127,18 +129,18 @@ export function resolveDatabasePath() {
   }
 }
 
-export function searchSessionMessages(query: string, options?: { limit?: number; offset?: number; dbPath?: string; directory?: string }) {
+export function searchSessionMessages(query: string, options?: { limit?: number; offset?: number; dbPath?: string; directory?: string; role?: SearchRole }) {
   const term = query.trim()
   if (!term) return []
   if (options?.dbPath === ":memory:") return []
   const dbPath = options?.dbPath ?? resolveDatabasePath()
   const db = getDb(dbPath)
-  return searchRows(db, dbPath, term, options?.limit ?? 80, options?.directory, options?.offset)
+  return searchRows(db, dbPath, term, options?.limit ?? 80, options?.directory, options?.offset, options?.role)
 }
 
-export function recentSessionMessages(options?: { limit?: number; offset?: number; dbPath?: string; directory?: string }) {
+export function recentSessionMessages(options?: { limit?: number; offset?: number; dbPath?: string; directory?: string; role?: SearchRole }) {
   const db = getDb(options?.dbPath)
-  return visibleTextRows(db, options?.limit ?? 40, undefined, options?.directory, options?.offset).flatMap(
+  return visibleTextRows(db, options?.limit ?? 40, undefined, options?.directory, options?.offset, options?.role).flatMap(
     (row) => rowToSearchResult(row, "") ?? [],
   )
 }
@@ -535,10 +537,10 @@ function parseToolState(value: unknown): ToolState | undefined {
   }
 }
 
-function searchRows(db: Database, dbPath: string, query: string, limit: number, directory?: string, offset?: number) {
+function searchRows(db: Database, dbPath: string, query: string, limit: number, directory?: string, offset?: number, role?: SearchRole) {
   if (!tableExists(db, "part") || !tableExists(db, "message")) return []
   debug.time("query:sql")
-  const rows = indexedTextRows(db, dbPath, limit, query, directory, offset) ?? visibleTextRows(db, limit, query, directory, offset)
+  const rows = indexedTextRows(db, dbPath, limit, query, directory, offset, role) ?? visibleTextRows(db, limit, query, directory, offset, role)
   debug.timeEnd("query:sql")
   debug.time("query:map")
   const results = rows.flatMap((row) => rowToSearchResult(row, query) ?? [])
@@ -546,13 +548,17 @@ function searchRows(db: Database, dbPath: string, query: string, limit: number, 
   return results
 }
 
-function indexedTextRows(db: Database, dbPath: string, limit: number, query: string, directory?: string, offset?: number) {
+function indexedTextRows(db: Database, dbPath: string, limit: number, query: string, directory?: string, offset?: number, role?: SearchRole) {
   const match = ftsQuery(query)
   if (!match) return []
   try {
     const index = ensureSearchIndex(db, dbPath)
     const conditions = ["document_fts MATCH ?"]
     const params: (string | number)[] = [match]
+    if (role) {
+      conditions.push("role = ?")
+      params.push(role)
+    }
     if (directory) {
       conditions.push("directory = ?")
       params.push(directory)
@@ -577,13 +583,15 @@ function indexedTextRows(db: Database, dbPath: string, limit: number, query: str
   }
 }
 
-function visibleTextRows(db: Database, limit: number, query?: string, directory?: string, offset?: number) {
+function visibleTextRows(db: Database, limit: number, query?: string, directory?: string, offset?: number, role?: SearchRole) {
   const offsetClause = offset ? "OFFSET ?" : ""
   const conditions: string[] = [
     "json_extract(p.data, '$.type') = 'text'",
-    "json_extract(m.data, '$.role') IN ('user', 'assistant')",
+    role ? "json_extract(m.data, '$.role') = ?" : "json_extract(m.data, '$.role') IN ('user', 'assistant')",
   ]
   const params: (string | number)[] = []
+
+  if (role) params.push(role)
 
   if (directory) {
     conditions.push("s.directory = ?")
