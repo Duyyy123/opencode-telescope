@@ -51,8 +51,9 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
   const RESULT_PREFETCH_AHEAD_ROWS = 25
   const RESULT_OVERSCAN_MULTIPLIER = 2
   const RESULT_CACHE_BEHIND_VIEWPORTS = 6
-  const INITIAL_PREVIEW_BEFORE = 20
-  const INITIAL_PREVIEW_AFTER = 30
+  const INITIAL_PREVIEW_BEFORE = 6
+  const INITIAL_PREVIEW_AFTER = 12
+  const INITIAL_PREVIEW_DELAY_MS = 75
   const PREVIEW_PAGE_SIZE = 20
   const PREVIEW_PREFETCH_VIEWPORTS = 0.5
   let input: InputRenderable | undefined
@@ -554,28 +555,54 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     lastPreviewItemId = item.id
     cancelPreviewPrefetch()
     resetPreviewScroll()
+    solidBatch(() => {
+      setPreviewParts([])
+      setHasMorePreviewBefore(false)
+      setHasMorePreviewAfter(false)
+      setPreviewEdgeLoadingReady(false)
+    })
     debug.log("preview:new-item", item.sessionTitle?.slice(0, 40) ?? item.id.slice(-8))
     const db = dbPath()
-    debug.time("preview:load")
-    try {
-      const page = loadConversationAround(item, { before: INITIAL_PREVIEW_BEFORE, after: INITIAL_PREVIEW_AFTER, dbPath: db })
-      debug.log("preview:init", {
-        item: item.id,
-        session: item.sessionID,
-        parts: page.parts.length,
-        hasMoreBefore: page.hasMoreBefore,
-        hasMoreAfter: page.hasMoreAfter,
-        first: page.parts[0]?.id,
-        last: page.parts.at(-1)?.id,
-      })
-      solidBatch(() => {
-        setPreviewParts(page.parts)
-        setHasMorePreviewBefore(page.hasMoreBefore)
-        setHasMorePreviewAfter(page.hasMoreAfter)
-      })
-    } catch {}
+    const itemId = item.id
+    debug.log("preview:schedule", { item: item.id, delayMs: INITIAL_PREVIEW_DELAY_MS, before: INITIAL_PREVIEW_BEFORE, after: INITIAL_PREVIEW_AFTER })
     debug.timeEnd("nav:total")
-    debug.timeEnd("preview:load")
+    const timer = setTimeout(() => {
+      if (selectedResult()?.id !== itemId) {
+        debug.log("preview:load:cancelled", { item: itemId })
+        return
+      }
+      debug.time("preview:load")
+      try {
+        const page = loadConversationAround(item, { before: INITIAL_PREVIEW_BEFORE, after: INITIAL_PREVIEW_AFTER, dbPath: db })
+        if (selectedResult()?.id !== itemId) {
+          debug.log("preview:load:cancelled", { item: itemId, afterLoad: true })
+          return
+        }
+        debug.log("preview:init", {
+          item: item.id,
+          session: item.sessionID,
+          parts: page.parts.length,
+          hasMoreBefore: page.hasMoreBefore,
+          hasMoreAfter: page.hasMoreAfter,
+          first: page.parts[0]?.id,
+          last: page.parts.at(-1)?.id,
+        })
+        solidBatch(() => {
+          setPreviewParts(page.parts)
+          setHasMorePreviewBefore(page.hasMoreBefore)
+          setHasMorePreviewAfter(page.hasMoreAfter)
+        })
+      } catch {
+      } finally {
+        debug.timeEnd("preview:load")
+      }
+    }, INITIAL_PREVIEW_DELAY_MS)
+    onCleanup(() => {
+      clearTimeout(timer)
+      if (selectedResult()?.id !== itemId) {
+        debug.log("preview:load:cancelled", { item: itemId, cleanup: true })
+      }
+    })
   })
 
   createEffect(() => {
