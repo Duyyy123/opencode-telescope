@@ -59,7 +59,7 @@ export const ConversationPreview = (props: { item: SearchResult; parts: Conversa
 )
 
 const PreviewConversationPart = (props: { part: ConversationPreviewPart; item: SearchResult; syntax: SyntaxStyle; theme: TuiThemeCurrent }) => {
-  if (props.part.type === "tool") return <PreviewToolPart part={props.part} theme={props.theme} />
+  if (props.part.type === "tool") return <PreviewToolPart part={props.part} item={props.item} syntax={props.syntax} theme={props.theme} />
   if (props.part.type === "reasoning") return <PreviewReasoningPart part={props.part} syntax={props.syntax} theme={props.theme} />
   if (props.part.role === "assistant") return <PreviewAssistantPart part={props.part} item={props.item} syntax={props.syntax} theme={props.theme} />
   return <PreviewUserPart part={props.part} item={props.item} theme={props.theme} />
@@ -129,7 +129,7 @@ const PreviewReasoningPart = (props: { part: ConversationPreviewPart; syntax: Sy
   )
 }
 
-const PreviewToolPart = (props: { part: ConversationPreviewPart; theme: TuiThemeCurrent }) => {
+const PreviewToolPart = (props: { part: ConversationPreviewPart; item: SearchResult; syntax: SyntaxStyle; theme: TuiThemeCurrent }) => {
   const status = createMemo(() => props.part.state?.status ?? "pending")
   const failed = createMemo(() => status() === "error")
   const color = createMemo(() => {
@@ -137,26 +137,138 @@ const PreviewToolPart = (props: { part: ConversationPreviewPart; theme: TuiTheme
     if (status() === "completed") return props.theme.textMuted
     return props.theme.text
   })
+  const codeTool = createMemo(() => props.part.tool === "apply_patch" || props.part.tool === "edit" || props.part.tool === "write")
   return (
-    <box id={`tool-inline-${props.part.messageID}-${props.part.id}`} paddingLeft={3} marginTop={1} flexDirection="column" flexShrink={0}>
+    <box id={`tool-${props.part.messageID}-${props.part.id}`} paddingLeft={3} marginTop={1} flexDirection="column" flexShrink={0}>
       <Show when={props.part.target}>
-        <TargetMarker part={props.part} role="tool" time={props.part.timeCreated} theme={props.theme} />
+        <TargetMarker part={props.part} item={props.item} role={props.part.tool ?? "tool"} time={props.part.timeCreated} theme={props.theme} />
       </Show>
-      <text fg={color()} wrapMode="none" overflow="hidden">
-        <span style={{ fg: failed() ? props.theme.error : props.theme.textMuted }}>{toolIcon(props.part.tool)} </span>
-        <span>{toolLabel(props.part.tool)}</span>
-        <span style={{ fg: props.theme.textMuted }}> {toolInputSummary(props.part.state?.input)}</span>
-        <span style={{ fg: props.theme.textMuted }}> · {status()}</span>
-      </text>
+      <Show when={codeTool()} fallback={<CompactToolRow part={props.part} color={color()} failed={failed()} theme={props.theme} />}>
+        <CodeToolPreview part={props.part} syntax={props.syntax} theme={props.theme} />
+      </Show>
       <Show when={props.part.state?.error}>
         {(error) => <text fg={props.theme.error}>{error()}</text>}
-      </Show>
-      <Show when={failed() ? props.part.state?.output : undefined}>
-        {(output) => <text fg={props.theme.textMuted}>{truncate(output().trim(), 300)}</text>}
       </Show>
     </box>
   )
 }
+
+const CompactToolRow = (props: { part: ConversationPreviewPart; color: any; failed: boolean; theme: TuiThemeCurrent }) => (
+  <>
+    <text fg={props.color} wrapMode="none" overflow="hidden">
+      <span style={{ fg: props.failed ? props.theme.error : props.theme.textMuted }}>{toolIcon(props.part.tool)} </span>
+      <span>{toolLabel(props.part.tool)}</span>
+      <span style={{ fg: props.theme.textMuted }}> {toolInputSummary(props.part.state?.input)}</span>
+      <span style={{ fg: props.theme.textMuted }}> · {props.part.state?.status ?? "pending"}</span>
+    </text>
+    <Show when={props.failed ? props.part.state?.output : undefined}>
+      {(output) => <text fg={props.theme.textMuted}>{truncate(output().trim(), 300)}</text>}
+    </Show>
+  </>
+)
+
+const CodeToolPreview = (props: { part: ConversationPreviewPart; syntax: SyntaxStyle; theme: TuiThemeCurrent }) => {
+  if (props.part.tool === "apply_patch") return <ApplyPatchPreview part={props.part} syntax={props.syntax} theme={props.theme} />
+  if (props.part.tool === "edit") return <EditPreview part={props.part} syntax={props.syntax} theme={props.theme} />
+  if (props.part.tool === "write") return <WritePreview part={props.part} syntax={props.syntax} theme={props.theme} />
+  return <CompactToolRow part={props.part} color={props.theme.textMuted} failed={false} theme={props.theme} />
+}
+
+const ApplyPatchPreview = (props: { part: ConversationPreviewPart; syntax: SyntaxStyle; theme: TuiThemeCurrent }) => {
+  const files = createMemo(() => parseApplyPatchFiles(props.part.state?.metadata))
+  return (
+    <Show when={files().length > 0} fallback={<CompactToolRow part={props.part} color={props.theme.textMuted} failed={false} theme={props.theme} />}>
+      <For each={files()}>
+        {(file) => (
+          <ToolBlock title={patchTitle(file)} theme={props.theme}>
+            <DiffBlock diff={file.patch} filePath={file.filePath} syntax={props.syntax} theme={props.theme} />
+          </ToolBlock>
+        )}
+      </For>
+    </Show>
+  )
+}
+
+const EditPreview = (props: { part: ConversationPreviewPart; syntax: SyntaxStyle; theme: TuiThemeCurrent }) => {
+  const input = createMemo(() => recordValue(props.part.state?.input))
+  const metadata = createMemo(() => recordValue(props.part.state?.metadata))
+  const diff = createMemo(() => stringValue(metadata()?.diff) ?? stringValue(recordValue(metadata()?.filediff)?.patch) ?? "")
+  const filePath = createMemo(() => stringValue(input()?.filePath) ?? stringValue(recordValue(metadata()?.filediff)?.file) ?? "")
+  return (
+    <Show when={diff()} fallback={<CompactToolRow part={props.part} color={props.theme.textMuted} failed={false} theme={props.theme} />}>
+      {(value) => (
+        <ToolBlock title={`← Edit ${shortPath(filePath())}`} theme={props.theme}>
+          <DiffBlock diff={value()} filePath={filePath()} syntax={props.syntax} theme={props.theme} />
+        </ToolBlock>
+      )}
+    </Show>
+  )
+}
+
+const WritePreview = (props: { part: ConversationPreviewPart; syntax: SyntaxStyle; theme: TuiThemeCurrent }) => {
+  const input = createMemo(() => recordValue(props.part.state?.input))
+  const filePath = createMemo(() => stringValue(input()?.filePath) ?? "")
+  const content = createMemo(() => stringValue(input()?.content) ?? "")
+  return (
+    <Show when={content()} fallback={<CompactToolRow part={props.part} color={props.theme.textMuted} failed={false} theme={props.theme} />}>
+      {(value) => (
+        <ToolBlock title={`# Wrote ${shortPath(filePath())}`} theme={props.theme}>
+          <line_number fg={props.theme.textMuted} minWidth={3} paddingRight={1}>
+            <code
+              conceal={false}
+              fg={props.theme.text}
+              filetype={filetype(filePath())}
+              syntaxStyle={props.syntax}
+              content={value()}
+            />
+          </line_number>
+        </ToolBlock>
+      )}
+    </Show>
+  )
+}
+
+const ToolBlock = (props: { title: string; children: any; theme: TuiThemeCurrent }) => (
+  <box
+    border={["left"]}
+    paddingTop={1}
+    paddingBottom={1}
+    paddingLeft={2}
+    marginTop={1}
+    gap={1}
+    backgroundColor={props.theme.backgroundPanel}
+    customBorderChars={splitBorderChars}
+    borderColor={props.theme.background}
+    flexDirection="column"
+  >
+    <text paddingLeft={3} fg={props.theme.textMuted}>{props.title}</text>
+    {props.children}
+  </box>
+)
+
+const DiffBlock = (props: { diff: string; filePath: string; syntax: SyntaxStyle; theme: TuiThemeCurrent }) => (
+  <box paddingLeft={1}>
+    <diff
+      diff={props.diff}
+      view="unified"
+      filetype={filetype(props.filePath)}
+      syntaxStyle={props.syntax}
+      showLineNumbers={true}
+      width="100%"
+      wrapMode="word"
+      fg={props.theme.text}
+      addedBg={props.theme.diffAddedBg}
+      removedBg={props.theme.diffRemovedBg}
+      contextBg={props.theme.diffContextBg}
+      addedSignColor={props.theme.diffHighlightAdded}
+      removedSignColor={props.theme.diffHighlightRemoved}
+      lineNumberFg={props.theme.diffLineNumber}
+      lineNumberBg={props.theme.diffContextBg}
+      addedLineNumberBg={props.theme.diffAddedLineNumberBg}
+      removedLineNumberBg={props.theme.diffRemovedLineNumberBg}
+    />
+  </box>
+)
 
 const TargetMarker = (props: { part: ConversationPreviewPart; item?: SearchResult; role: string; time: number; theme: TuiThemeCurrent }) => (
   <box flexDirection="column" flexShrink={0}>
@@ -272,4 +384,63 @@ function matchExcerpt(text: string, query: string, radius = 80) {
     match: text.slice(firstStart, lastEnd),
     after: `${text.slice(lastEnd, afterEnd).replace(/\s+/g, " ")}${afterEnd < text.length ? "..." : ""}`,
   }
+}
+
+function parseApplyPatchFiles(metadata: unknown) {
+  const files = recordValue(metadata)?.files
+  if (!Array.isArray(files)) return []
+  return files.flatMap((item) => {
+    const file = recordValue(item)
+    const filePath = stringValue(file?.filePath)
+    const relativePath = stringValue(file?.relativePath) ?? filePath
+    const patch = stringValue(file?.patch)
+    const type = stringValue(file?.type) ?? "update"
+    const deletions = numberValue(file?.deletions) ?? 0
+    if (!filePath || !relativePath || patch === undefined) return []
+    return [{ filePath, relativePath, patch, type, deletions }]
+  })
+}
+
+function patchTitle(file: { type: string; relativePath: string; filePath: string; deletions: number }) {
+  if (file.type === "delete") return `# Deleted ${file.relativePath}`
+  if (file.type === "add") return `# Created ${file.relativePath}`
+  if (file.type === "move") return `# Moved ${shortPath(file.filePath)} -> ${file.relativePath}`
+  return `← Patched ${file.relativePath}`
+}
+
+function recordValue(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return
+  return value as Record<string, unknown>
+}
+
+function stringValue(value: unknown) {
+  return typeof value === "string" ? value : undefined
+}
+
+function numberValue(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined
+}
+
+function shortPath(value: string) {
+  if (!value) return "file"
+  const parts = value.split(/[\\/]/)
+  return parts.slice(-3).join("/")
+}
+
+function filetype(input: string) {
+  const ext = input.split(".").at(-1)?.toLowerCase()
+  if (!ext || ext === input.toLowerCase()) return "none"
+  if (["ts", "tsx", "js", "jsx", "mts", "cts"].includes(ext)) return "typescript"
+  if (ext === "py") return "python"
+  if (ext === "go") return "go"
+  if (ext === "rs") return "rust"
+  if (ext === "rb") return "ruby"
+  if (ext === "java") return "java"
+  if (ext === "json") return "json"
+  if (ext === "md") return "markdown"
+  if (ext === "yml" || ext === "yaml") return "yaml"
+  if (ext === "sql") return "sql"
+  if (ext === "sh" || ext === "bash" || ext === "zsh") return "shellscript"
+  if (ext === "diff" || ext === "patch") return "diff"
+  return ext
 }

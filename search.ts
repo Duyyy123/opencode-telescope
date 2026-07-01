@@ -11,6 +11,8 @@ export type SearchResult = {
   sessionTitle: string
   directory: string
   role: "user" | "assistant"
+  partType: "text" | "reasoning" | "tool"
+  tool?: string
   timeCreated: number
   snippet: string
   matchStart: number
@@ -56,6 +58,7 @@ export type ConversationPreviewCursor = {
 export type ToolState = {
   status: "pending" | "running" | "completed" | "error"
   input?: unknown
+  metadata?: unknown
   output?: string
   error?: string
 }
@@ -67,8 +70,14 @@ type Row = {
   session_title: string | null
   directory: string
   role: SearchRole
+  part_type?: SearchResult["partType"]
+  tool?: string | null
   time_created: number
   text: string
+}
+
+type IndexSourceRow = Omit<Row, "text"> & {
+  data: string
 }
 
 type ConversationRow = {
@@ -318,6 +327,8 @@ export function rowToSearchResult(row: Row, query: string): SearchResult | undef
     sessionTitle: row.session_title || "Untitled session",
     directory: row.directory,
     role: row.role,
+    partType: row.part_type ?? "text",
+    tool: row.tool ?? undefined,
     timeCreated: row.time_created,
     snippet: makeSnippet(text, query),
     matchStart: match.start,
@@ -490,7 +501,7 @@ function parseConversationPart(row: ConversationRow, target: boolean): Conversat
       role: row.role,
       type: row.type,
       timeCreated: row.time_created,
-      text: "",
+      text: extractToolIndexText(data).trim(),
       tool: typeof data.tool === "string" ? data.tool : "tool",
       state: parseToolState(data.state),
       target,
@@ -532,6 +543,7 @@ function parseToolState(value: unknown): ToolState | undefined {
   return {
     status: state.status as ToolState["status"],
     input: state.input,
+    metadata: state.metadata,
     output: typeof state.output === "string" ? state.output : undefined,
     error: typeof state.error === "string" ? state.error : undefined,
   }
@@ -568,7 +580,7 @@ function indexedTextRows(db: Database, dbPath: string, limit: number, query: str
     const offsetClause = offset ? "OFFSET ?" : ""
     debug.time("query:fts:exec")
     const rows = index.query<Row, (string | number)[]>(`
-      SELECT id, message_id, session_id, session_title, directory, role,
+      SELECT id, message_id, session_id, session_title, directory, role, part_type, tool,
              CAST(time_created AS INTEGER) AS time_created, text
       FROM document_fts
       WHERE ${conditions.join(" AND ")}
@@ -638,15 +650,18 @@ function ensureSearchIndex(source: Database, sourcePath: string) {
   const currentDataVersion = getMeta(_indexDb, "source_data_version")
   const currentMtimeMs = getMeta(_indexDb, "source_mtime_ms")
   const currentPath = getMeta(_indexDb, "source_path")
-  if (currentPath !== sourcePath || currentDataVersion !== String(state.dataVersion) || currentMtimeMs !== String(state.mtimeMs)) {
+  const currentIndexVersion = getMeta(_indexDb, "index_version")
+  if (currentPath !== sourcePath || currentDataVersion !== String(state.dataVersion) || currentMtimeMs !== String(state.mtimeMs) || currentIndexVersion !== SEARCH_INDEX_VERSION) {
     rebuildSearchIndex(source, _indexDb, sourcePath, state)
   }
   return _indexDb
 }
 
+const SEARCH_INDEX_VERSION = "4"
+
 function searchIndexPath(sourcePath: string) {
   const parsed = path.parse(sourcePath)
-  return path.join(parsed.dir, `${parsed.name}-search.db`)
+  return path.join(parsed.dir, `${parsed.name}-telescope-search.db`)
 }
 
 function migrateSearchIndex(db: Database) {
@@ -662,11 +677,33 @@ function migrateSearchIndex(db: Database) {
       session_title,
       directory UNINDEXED,
       role UNINDEXED,
+      part_type UNINDEXED,
+      tool UNINDEXED,
       time_created UNINDEXED,
       text,
       tokenize='unicode61'
     );
   `)
+
+  const columns = db.query<{ name: string }, []>("PRAGMA table_info(document_fts)").all().map((column) => column.name)
+  if (!columns.includes("part_type") || !columns.includes("tool")) {
+    db.exec("DROP TABLE document_fts")
+    db.exec(`
+      CREATE VIRTUAL TABLE document_fts USING fts5(
+        id UNINDEXED,
+        message_id UNINDEXED,
+        session_id UNINDEXED,
+        session_title,
+        directory UNINDEXED,
+        role UNINDEXED,
+        part_type UNINDEXED,
+        tool UNINDEXED,
+        time_created UNINDEXED,
+        text,
+        tokenize='unicode61'
+      );
+    `)
+  }
 }
 
 function sourceState(db: Database, sourcePath: string) {
@@ -677,27 +714,34 @@ function sourceState(db: Database, sourcePath: string) {
 
 function rebuildSearchIndex(source: Database, index: Database, sourcePath: string, state: { dataVersion: number; mtimeMs: number }) {
   debug.time("fts:rebuild")
-  const rows = source.query<Row, []>(`
+  const rows = source.query<IndexSourceRow, []>(`
     SELECT p.id, p.message_id, p.session_id, s.title AS session_title, s.directory,
            json_extract(m.data, '$.role') AS role,
+           json_extract(p.data, '$.type') AS part_type,
+           json_extract(p.data, '$.tool') AS tool,
            p.time_created,
-           json_extract(p.data, '$.text') AS text
+           p.data
     FROM part p
     JOIN message m ON m.id = p.message_id
     JOIN session s ON s.id = p.session_id
-    WHERE json_extract(p.data, '$.type') = 'text'
+    WHERE (
+        json_extract(p.data, '$.type') = 'text'
+        OR (
+          json_extract(p.data, '$.type') = 'tool'
+          AND json_extract(p.data, '$.tool') IN ('apply_patch', 'edit', 'write')
+        )
+      )
       AND json_extract(m.data, '$.role') IN ('user', 'assistant')
-      AND json_extract(p.data, '$.text') IS NOT NULL
     ORDER BY p.time_created DESC
   `).all()
-  const insert = index.query<Row, [string, string, string, string, string, string, number, string]>(`
-    INSERT INTO document_fts(id, message_id, session_id, session_title, directory, role, time_created, text)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  const insert = index.query<Row, [string, string, string, string, string, string, SearchResult["partType"], string | null, number, string]>(`
+    INSERT INTO document_fts(id, message_id, session_id, session_title, directory, role, part_type, tool, time_created, text)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `)
   index.exec("BEGIN IMMEDIATE")
   try {
     index.exec("DELETE FROM document_fts")
-    for (const row of rows) {
+    for (const row of rows.flatMap(indexSourceRowToRows)) {
       insert.run(
         row.id,
         row.message_id,
@@ -705,6 +749,8 @@ function rebuildSearchIndex(source: Database, index: Database, sourcePath: strin
         row.session_title ?? "Untitled session",
         row.directory,
         row.role,
+        row.part_type ?? "text",
+        row.tool ?? null,
         row.time_created,
         row.text,
       )
@@ -712,6 +758,7 @@ function rebuildSearchIndex(source: Database, index: Database, sourcePath: strin
     setMeta(index, "source_path", sourcePath)
     setMeta(index, "source_data_version", String(state.dataVersion))
     setMeta(index, "source_mtime_ms", String(state.mtimeMs))
+    setMeta(index, "index_version", SEARCH_INDEX_VERSION)
     index.exec("COMMIT")
   } catch (err) {
     index.exec("ROLLBACK")
@@ -738,6 +785,75 @@ function setMeta(db: Database, key: string, value: string) {
     INSERT INTO index_meta(key, value) VALUES (?, ?)
     ON CONFLICT(key) DO UPDATE SET value = excluded.value
   `).run(key, value)
+}
+
+function indexSourceRowToRows(row: IndexSourceRow): Row[] {
+  const text = extractIndexText(row.data)
+  if (!text) return []
+  return [{ ...row, text }]
+}
+
+function extractIndexText(data: string) {
+  try {
+    const value = JSON.parse(data) as unknown
+    if (!value || typeof value !== "object" || Array.isArray(value)) return ""
+    const record = value as Record<string, unknown>
+    if (record.type === "text") return typeof record.text === "string" ? record.text.trim() : ""
+    if (record.type !== "tool") return ""
+    return extractToolIndexText(record).replace(/\s+/g, " ").trim()
+  } catch {
+    return ""
+  }
+}
+
+function extractToolIndexText(part: Record<string, unknown>) {
+  const tool = typeof part.tool === "string" ? part.tool : ""
+  const state = recordValue(part.state)
+  const input = recordValue(state?.input)
+  const metadata = recordValue(state?.metadata)
+
+  if (tool === "apply_patch") {
+    const files = Array.isArray(metadata?.files) ? metadata.files : []
+    const renderedPatches = files.map(applyPatchFileIndexText).filter(Boolean).join("\n")
+    const patchText = stringValue(input?.patchText)
+    return [renderedPatches, patchText].filter(Boolean).join("\n")
+  }
+
+  if (tool === "edit") {
+    const filediff = recordValue(metadata?.filediff)
+    return [
+      stringValue(input?.filePath),
+      stringValue(metadata?.diff),
+      stringValue(filediff?.patch),
+      stringValue(input?.oldString),
+      stringValue(input?.newString),
+    ].filter(Boolean).join("\n")
+  }
+
+  if (tool === "write") {
+    return [stringValue(input?.filePath), stringValue(input?.content)].filter(Boolean).join("\n")
+  }
+
+  return ""
+}
+
+function applyPatchFileIndexText(value: unknown) {
+  const file = recordValue(value)
+  if (!file) return ""
+  return [
+    stringValue(file.filePath),
+    stringValue(file.relativePath),
+    stringValue(file.patch),
+  ].filter(Boolean).join("\n")
+}
+
+function recordValue(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return
+  return value as Record<string, unknown>
+}
+
+function stringValue(value: unknown) {
+  return typeof value === "string" ? value : undefined
 }
 
 const tableCache = new Map<string, boolean>()

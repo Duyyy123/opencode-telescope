@@ -171,6 +171,150 @@ describe("session search helpers", () => {
     }
   })
 
+  test("searches code snippets stored in apply_patch metadata", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "opencode-telescope-patch-"))
+    const dbPath = path.join(dir, "opencode.db")
+    const db = new Database(dbPath)
+    try {
+      db.exec(`
+        CREATE TABLE session(id TEXT PRIMARY KEY, title TEXT, directory TEXT);
+        CREATE TABLE message(id TEXT PRIMARY KEY, session_id TEXT, data TEXT);
+        CREATE TABLE part(id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT);
+      `)
+      db.query("INSERT INTO session(id, title, directory) VALUES (?, ?, ?)").run("ses_1", "Patch Test", dir)
+      db.query("INSERT INTO message(id, session_id, data) VALUES (?, ?, ?)").run("msg_1", "ses_1", JSON.stringify({ role: "assistant" }))
+      db.query("INSERT INTO part(id, message_id, session_id, time_created, data) VALUES (?, ?, ?, ?, ?)")
+        .run("prt_patch", "msg_1", "ses_1", 1, JSON.stringify({
+          type: "tool",
+          tool: "apply_patch",
+          state: {
+            status: "completed",
+            input: {
+              patchText: "*** Begin Patch\n+const validateForSubmit = () => true\n*** End Patch",
+            },
+            metadata: {
+              files: [{
+                filePath: path.join(dir, "src/service.ts"),
+                relativePath: "src/service.ts",
+                type: "update",
+                patch: "Index: src/service.ts\n@@\n+const validateForSubmit = () => true",
+                deletions: 0,
+              }],
+            },
+          },
+        }))
+
+      const results = searchSessionMessages("validateForSubmit", { dbPath, directory: dir, limit: 10 })
+      expect(results.map((item) => item.id)).toEqual(["prt_patch"])
+      expect(results[0]?.text).toContain("validateForSubmit")
+    } finally {
+      db.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("paginates apply_patch FTS rows without post-filtering raw parts", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "opencode-telescope-patch-page-"))
+    const dbPath = path.join(dir, "opencode.db")
+    const db = new Database(dbPath)
+    try {
+      db.exec(`
+        CREATE TABLE session(id TEXT PRIMARY KEY, title TEXT, directory TEXT);
+        CREATE TABLE message(id TEXT PRIMARY KEY, session_id TEXT, data TEXT);
+        CREATE TABLE part(id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT);
+      `)
+      db.query("INSERT INTO session(id, title, directory) VALUES (?, ?, ?)").run("ses_1", "Patch Page Test", dir)
+      db.query("INSERT INTO message(id, session_id, data) VALUES (?, ?, ?)").run("msg_1", "ses_1", JSON.stringify({ role: "assistant" }))
+      const insert = db.query("INSERT INTO part(id, message_id, session_id, time_created, data) VALUES (?, ?, ?, ?, ?)")
+      for (let index = 0; index < 35; index++) {
+        insert.run(`prt_patch_${index}`, "msg_1", "ses_1", index, JSON.stringify({
+          type: "tool",
+          tool: "apply_patch",
+          state: {
+            status: "completed",
+            input: {},
+            metadata: {
+              files: [{
+                filePath: path.join(dir, `src/service-${index}.ts`),
+                relativePath: `src/service-${index}.ts`,
+                type: "update",
+                patch: `Index: src/service-${index}.ts\n@@\n+const paginatedPatchNeedle${index} = true`,
+                deletions: 0,
+              }],
+            },
+          },
+        }))
+      }
+
+      const first = searchSessionMessages("paginatedPatchNeedle", { dbPath, directory: dir, limit: 10 })
+      const second = searchSessionMessages("paginatedPatchNeedle", { dbPath, directory: dir, limit: 10, offset: 10 })
+      expect(first).toHaveLength(10)
+      expect(second).toHaveLength(10)
+      expect(first[0]?.id).toBe("prt_patch_34")
+      expect(second[0]?.id).toBe("prt_patch_24")
+    } finally {
+      db.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("uses a Telescope-owned sidecar instead of OpenCode's search db", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "opencode-telescope-sidecar-"))
+    const dbPath = path.join(dir, "opencode.db")
+    const conflictingSearchPath = path.join(dir, "opencode-search.db")
+    const db = new Database(dbPath)
+    const conflict = new Database(conflictingSearchPath)
+    try {
+      conflict.exec(`
+        CREATE TABLE index_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE document(rowid INTEGER PRIMARY KEY, title TEXT, directory TEXT, path TEXT, role TEXT, part_type TEXT, text TEXT);
+        CREATE VIRTUAL TABLE document_fts USING fts5(
+          title,
+          directory,
+          path,
+          role,
+          part_type,
+          text,
+          content='document',
+          content_rowid='rowid'
+        );
+      `)
+
+      db.exec(`
+        CREATE TABLE session(id TEXT PRIMARY KEY, title TEXT, directory TEXT);
+        CREATE TABLE message(id TEXT PRIMARY KEY, session_id TEXT, data TEXT);
+        CREATE TABLE part(id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT);
+      `)
+      db.query("INSERT INTO session(id, title, directory) VALUES (?, ?, ?)").run("ses_1", "Patch Test", dir)
+      db.query("INSERT INTO message(id, session_id, data) VALUES (?, ?, ?)").run("msg_1", "ses_1", JSON.stringify({ role: "assistant" }))
+      db.query("INSERT INTO part(id, message_id, session_id, time_created, data) VALUES (?, ?, ?, ?, ?)")
+        .run("prt_patch", "msg_1", "ses_1", 1, JSON.stringify({
+          type: "tool",
+          tool: "apply_patch",
+          state: {
+            status: "completed",
+            input: {},
+            metadata: {
+              files: [{
+                filePath: path.join(dir, "src/service.ts"),
+                relativePath: "src/service.ts",
+                type: "update",
+                patch: "Index: src/service.ts\n@@\n+const collisionSafePatchNeedle = true",
+                deletions: 0,
+              }],
+            },
+          },
+        }))
+
+      const results = searchSessionMessages("collisionSafePatchNeedle", { dbPath, directory: dir, limit: 10 })
+      expect(results.map((item) => item.id)).toEqual(["prt_patch"])
+    } finally {
+      conflict.close()
+      db.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   test("filters recent messages by role", () => {
     const dir = mkdtempSync(path.join(tmpdir(), "opencode-telescope-role-"))
     const dbPath = path.join(dir, "opencode.db")
@@ -233,9 +377,53 @@ describe("session search helpers", () => {
       rmSync(dir, { recursive: true, force: true })
     }
   })
+
+  test("loads apply_patch preview text and metadata", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "opencode-telescope-preview-tool-"))
+    const dbPath = path.join(dir, "opencode.db")
+    const db = new Database(dbPath)
+    try {
+      db.exec(`
+        CREATE TABLE session(id TEXT PRIMARY KEY, title TEXT, directory TEXT);
+        CREATE TABLE message(id TEXT PRIMARY KEY, session_id TEXT, data TEXT);
+        CREATE TABLE part(id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT);
+      `)
+      db.query("INSERT INTO session(id, title, directory) VALUES (?, ?, ?)").run("ses_1", "Patch Preview", dir)
+      db.query("INSERT INTO message(id, session_id, data) VALUES (?, ?, ?)").run("msg_1", "ses_1", JSON.stringify({ role: "assistant" }))
+      db.query("INSERT INTO part(id, message_id, session_id, time_created, data) VALUES (?, ?, ?, ?, ?)")
+        .run("prt_patch", "msg_1", "ses_1", 1, JSON.stringify({
+          type: "tool",
+          tool: "apply_patch",
+          state: {
+            status: "completed",
+            input: {},
+            metadata: {
+              files: [{
+                filePath: path.join(dir, "src/service.ts"),
+                relativePath: "src/service.ts",
+                type: "update",
+                patch: "Index: src/service.ts\n@@\n+const previewPatchNeedle = true",
+                deletions: 0,
+              }],
+            },
+          },
+        }))
+
+      const result = previewResult("prt_patch", "msg_1", "ses_1", dir, 1, "tool", "apply_patch", "previewPatchNeedle")
+      const around = loadConversationAround(result, { before: 0, after: 0, dbPath })
+      expect(around.parts).toHaveLength(1)
+      expect(around.parts[0]?.type).toBe("tool")
+      expect(around.parts[0]?.tool).toBe("apply_patch")
+      expect(around.parts[0]?.text).toContain("previewPatchNeedle")
+      expect(around.parts[0]?.state?.metadata).toBeDefined()
+    } finally {
+      db.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
 })
 
-function previewResult(id: string, messageID: string, sessionID: string, directory: string, timeCreated: number): SearchResult {
+function previewResult(id: string, messageID: string, sessionID: string, directory: string, timeCreated: number, partType: SearchResult["partType"] = "text", tool?: string, match = ""): SearchResult {
   return {
     id,
     messageID,
@@ -243,12 +431,14 @@ function previewResult(id: string, messageID: string, sessionID: string, directo
     sessionTitle: "Test",
     directory,
     role: "assistant",
+    partType,
+    tool,
     timeCreated,
     snippet: "",
     matchStart: 0,
     matchEnd: 0,
     before: "",
-    match: "",
+    match,
     after: "",
     excerpt: "",
     previewBefore: "",
