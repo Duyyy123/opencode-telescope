@@ -699,7 +699,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
           children: children.length,
         })
       }
-      if (atTop && hasMorePreviewBefore()) schedulePreviewBefore(totalContentHeight, false, true)
+      if (atTop && hasMorePreviewBefore()) schedulePreviewBefore(totalContentHeight, true, false)
       if (nearBottom && hasMorePreviewAfter()) schedulePreviewAfter(atBottom)
     }, 400)
     onCleanup(() => clearInterval(interval))
@@ -738,7 +738,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
 
     if (direction < 0 && scroll.scrollTop <= 0 && hasMorePreviewBefore()) {
       debug.log("preview:scroll-key:load-before", { direction, state: beforeState })
-      schedulePreviewBefore(previewContentHeight(), false, true)
+      schedulePreviewBefore(previewContentHeight(), true, true)
       return
     }
 
